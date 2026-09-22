@@ -1,6 +1,11 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.stats as stats
+import numpy as np
 
+"""
+FUNCIONES DEL LAB 1
+"""
 
 def rendimiento_anualizado(rendimientos, p=252):
     """Calcula el rendimiento geométrico anualizado (CAGR) de una serie de rendimientos.
@@ -165,3 +170,135 @@ def plot_drawdown(serie_rendimientos, titulo="Análisis de Drawdown"):
 
     plt.tight_layout()
     return fig, (ax1, ax2)
+
+
+"""
+FUNCIONES LAB 2
+"""
+
+def prueba_jarque_bera(rendimientos, alpha=0.05):
+    """Ejecuta la prueba de hipótesis de Jarque-Bera para evaluar la normalidad
+    de una serie de rendimientos a partir de su sesgo y curtosis.
+
+    Args:
+        rendimientos (pd.Series | np.ndarray): Serie o arreglo con los rendimientos financieros.
+        alpha (float, optional): Nivel de significancia para la regla de decisión.
+            Por defecto es 0.05 (5%).
+
+    Returns:
+        tuple (float, float):
+            - float: Valor del estadístico de prueba Jarque-Bera.
+            - float: P-value asociado a la prueba.
+    """
+    x, p_value = stats.jarque_bera(rendimientos)
+    print(f"Estadístico: {x:.3f}")
+    print(f"P-value: {p_value}")
+    if p_value < alpha:
+        print(f"Con un nivel de significancia del {alpha*100}% se rechaza la hipótesis nula")
+        print("Los rendimientos no tienen el sesgo y curtosis de una distribución normal")
+    else:
+        print(f"Con un nivel de significancia del {alpha*100}%")
+        print("no existe evidencia suficiente para rechazar que los rendimientos tienen el sesgo y curtosis de una distribución normal")
+    
+    return x, p_value
+
+
+def semideviation(r, objetivo=False):
+    """Calcula la semidesviación (downside risk) considerando únicamente las
+    desviaciones por debajo de un umbral o rendimiento objetivo.
+
+    Args:
+        r (pd.Series | pd.DataFrame): Serie temporal o DataFrame de rendimientos.
+        objetivo (float | bool, optional): Rendimiento mínimo aceptable (MAR) o umbral.
+            Si es False, se utiliza la media muestral de r como referencia.
+            Por defecto es False.
+
+    Returns:
+        float | pd.Series: Semidesviación calculada en formato decimal. Devuelve un
+            escalar (float) si r es pd.Series o una pd.Series si r es pd.DataFrame.
+    """
+    if objetivo is False:
+        # No hay objetivo, se elige la media
+        objetivo = r.mean()
+
+    # Calcular las desviaciones negativas
+    deviations = r[r < objetivo] - objetivo
+    squared_deviations = deviations**2
+
+    # Calcular la semidesviación
+    semidev = np.sqrt(squared_deviations.mean())
+    return semidev
+
+def var_historic(r, level=5):
+    """Calcula el Valor en Riesgo (VaR) no paramétrico (histórico) para un nivel de significancia dado.
+
+    Args:
+        r (pd.Series | pd.DataFrame | np.ndarray): Serie temporal, DataFrame o arreglo de rendimientos.
+        level (float | int, optional): Nivel de significancia o probabilidad en la cola (en porcentaje, ej. 5 para 5%).
+            Por defecto es 5.
+
+    Returns:
+        float | pd.Series: Valor en Riesgo histórico expresado como pérdida positiva (en formato decimal).
+            Devuelve un escalar (float) si r es Series/array o una pd.Series si r es DataFrame.
+    """
+    return -np.percentile(r, level)
+
+
+def var_gaussiano(r, nivel=5, modified=False):
+    """Calcula el Valor en Riesgo (VaR) Paramétrico Gaussiano con estadísticas muestrales.
+    Opcionalmente aplica la expansión de Cornish-Fisher para ajustar por sesgo y 
+    curtosis muestrales (VaR modificado).
+
+    Args:
+        r (pd.Series | pd.DataFrame): Serie temporal o DataFrame de rendimientos.
+        nivel (float | int, optional): Nivel de significancia o probabilidad en la cola (en porcentaje, ej. 5 para 5%).
+            Por defecto es 5.
+        modified (bool, optional): Indica si se aplica la aproximación de Cornish-Fisher
+            para incorporar asimetría y curtosis muestrales observadas. Por defecto es False.
+
+    Returns:
+        float | pd.Series: Valor en Riesgo paramétrico expresado como pérdida positiva (en formato decimal).
+            Devuelve un escalar (float) si r es pd.Series o una pd.Series si r es pd.DataFrame.
+    """
+    # Cuantil Z bajo normalidad estándar
+    z = stats.norm.ppf(nivel / 100)
+
+    if modified:
+        # bias=False calcula los estimadores insesgados (muestrales)
+        # fisher=False devuelve la curtosis de Pearson (donde la normal vale 3)
+        s = stats.skew(r, bias=False)
+        k = stats.kurtosis(r, fisher=False, bias=False)
+
+        z = (z +
+             (z**2 - 1) * s / 6 +
+             (z**3 - 3*z) * (k - 3) / 24 -
+             (2*z**3 - 5*z) * (s**2) / 36
+            )
+
+    # ddof=1 para la desviación estándar muestral (N - 1)
+    return -(r.mean() + z * r.std(ddof=1))
+
+
+def cvar_historic(r, level=5):
+    """Calcula el Valor en Riesgo Condicional (CVaR / Expected Shortfall) histórico,
+    correspondiente a la pérdida promedio esperada en los escenarios que superan el VaR histórico.
+
+    Args:
+        r (pd.Series | pd.DataFrame): Serie temporal o DataFrame de rendimientos.
+        level (float | int, optional): Nivel de significancia o probabilidad en la cola (en porcentaje, ej. 5 para 5%).
+            Por defecto es 5.
+
+    Raises:
+        TypeError: Si r no es una instancia de pd.Series o pd.DataFrame.
+
+    Returns:
+        float | pd.Series: CVaR histórico expresado como pérdida positiva (en formato decimal).
+            Devuelve un escalar (float) si r es pd.Series o una pd.Series si r es pd.DataFrame.
+    """
+    if isinstance(r, pd.Series):
+        is_beyond = r <= -var_historic(r, level=level)
+        return -r[is_beyond].mean()
+    elif isinstance(r, pd.DataFrame):
+        return r.aggregate(cvar_historic, level=level)
+    else:
+        raise TypeError("Expected r to be a Series or DataFrame")
