@@ -307,7 +307,7 @@ def cvar_historic(r, level=5):
 
     
 """
-FUNCIONES LAB 3
+FUNCIONES LAB 3 y LAB 4
 """
 
 def matriz_covarianza_anualizada(rendimientos, p=252):
