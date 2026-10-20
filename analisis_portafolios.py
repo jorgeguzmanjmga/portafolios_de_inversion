@@ -603,3 +603,144 @@ def plot_frontera_eficiente(rendimientos_esperados, matriz_cov, n_puntos=50,
     ax.legend(loc="best")
     plt.tight_layout()
     return fig, ax
+
+
+"""
+FUNCIONES LAB 4 (CML, MSR y GMV)
+
+"""
+
+def rendimiento_cml(volatilidad, rend_msr, vol_msr, tasa_libre_de_riesgo=0.0):
+    """Evalúa la ecuación de la Línea del Mercado de Capitales (CML):
+    r = r_f + (r_MSR - r_f) / sigma_MSR * sigma.
+
+    Args:
+        volatilidad (float | np.ndarray): Volatilidad (o arreglo de volatilidades) en la que se evalúa la recta.
+        rend_msr (float): Rendimiento esperado del portafolio de máximo Sharpe.
+        vol_msr (float): Volatilidad del portafolio de máximo Sharpe.
+        tasa_libre_de_riesgo (float, opcional): Tasa libre de riesgo anualizada. Por defecto 0.0.
+
+    Returns:
+        float | np.ndarray: Rendimiento esperado sobre la CML para cada volatilidad.
+    """
+    pendiente = (rend_msr - tasa_libre_de_riesgo) / vol_msr
+    return tasa_libre_de_riesgo + pendiente * np.asarray(volatilidad)
+
+
+def portafolios_cml(rend_msr, vol_msr, tasa_libre_de_riesgo=0.0, proporciones=None):
+    """Construye portafolios sobre la CML combinando el activo libre de riesgo con el MSR.
+    Una proporción mayor a 1 significa pedir prestado a la tasa libre de riesgo para
+    invertir más del 100% en el MSR (apalancamiento).
+
+    Args:
+        rend_msr (float): Rendimiento esperado del portafolio de máximo Sharpe.
+        vol_msr (float): Volatilidad del portafolio de máximo Sharpe.
+        tasa_libre_de_riesgo (float, opcional): Tasa libre de riesgo anualizada. Por defecto 0.0.
+        proporciones (array-like, opcional): Proporciones invertidas en el MSR.
+            Por defecto de 0 a 1.5 en pasos de 0.1.
+
+    Returns:
+        pd.DataFrame: DataFrame con columnas 'Peso MSR', 'Peso Libre de Riesgo',
+            'Rendimiento', 'Volatilidad' y 'Sharpe'.
+    """
+    if proporciones is None:
+        proporciones = np.linspace(0, 1.5, 16)
+    a = np.asarray(proporciones, dtype=float)
+
+    rendimiento = (1 - a) * tasa_libre_de_riesgo + a * rend_msr
+    volatilidad = a * vol_msr  # el activo libre de riesgo no tiene volatilidad ni covarianza
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sharpe = np.where(volatilidad > 0, (rendimiento - tasa_libre_de_riesgo) / volatilidad, np.nan)
+
+    return pd.DataFrame({
+        "Peso MSR": a,
+        "Peso Libre de Riesgo": 1 - a,
+        "Rendimiento": rendimiento,
+        "Volatilidad": volatilidad,
+        "Sharpe": sharpe,
+    })
+
+
+def pesos_gmv_2_activos(matriz_cov):
+    """Calcula con la fórmula cerrada los pesos del portafolio de mínima varianza de 2 activos:
+    w_1 = (sigma_2^2 - sigma_12) / (sigma_1^2 + sigma_2^2 - 2 sigma_12),  w_2 = 1 - w_1.
+    A diferencia de portafolio_minima_varianza, sí permite ventas en corto,
+    por lo que los pesos pueden quedar fuera de [0, 1].
+
+    Args:
+        matriz_cov (pd.DataFrame | np.ndarray): Matriz de covarianzas 2x2.
+
+    Raises:
+        ValueError: Si la matriz no es de 2x2.
+
+    Returns:
+        np.ndarray: Pesos [w_1, w_2] del portafolio de mínima varianza.
+    """
+    s = np.asarray(matriz_cov)
+    if s.shape != (2, 2):
+        raise ValueError("pesos_gmv_2_activos sólo acepta una matriz de covarianzas de 2x2")
+
+    w1 = (s[1, 1] - s[0, 1]) / (s[0, 0] + s[1, 1] - 2 * s[0, 1])
+    return np.array([w1, 1 - w1])
+
+
+def sensibilidad_pesos(rendimientos_esperados, matriz_cov, activo, valores, tasa_libre_de_riesgo=0.0):
+    """Recalcula los pesos del MSR y del GMV variando el rendimiento esperado de un activo,
+    manteniendo fijos los demás rendimientos y la matriz de covarianzas. Sirve para ver
+    que el MSR es muy sensible a los rendimientos esperados y el GMV no depende de ellos.
+
+    Args:
+        rendimientos_esperados (pd.Series): Rendimiento esperado anualizado de cada activo.
+        matriz_cov (pd.DataFrame): Matriz de covarianzas anualizada de los activos.
+        activo (str): Nombre del activo cuyo rendimiento esperado se modifica.
+        valores (array-like): Rendimientos esperados a probar para ese activo.
+        tasa_libre_de_riesgo (float, opcional): Tasa libre de riesgo anualizada. Por defecto 0.0.
+
+    Returns:
+        tuple (pd.DataFrame, pd.DataFrame): Pesos del MSR y pesos del GMV; una fila por cada
+            valor probado y una columna por activo.
+    """
+    filas_msr, filas_gmv = [], []
+    for valor in valores:
+        r = rendimientos_esperados.copy()
+        r[activo] = valor
+        filas_msr.append(portafolio_max_sharpe(r, matriz_cov, tasa_libre_de_riesgo))
+        filas_gmv.append(portafolio_minima_varianza(matriz_cov))
+
+    indice = pd.Index(np.round(valores, 4), name=f"Rendimiento esperado de {activo}")
+    pesos_msr = pd.DataFrame(filas_msr, index=indice, columns=rendimientos_esperados.index)
+    pesos_gmv = pd.DataFrame(filas_gmv, index=indice, columns=rendimientos_esperados.index)
+    return pesos_msr, pesos_gmv
+
+
+def plot_pesos_apilados(pesos, titulo="Pesos del portafolio", ax=None):
+    """Grafica en barras apiladas los pesos de varios portafolios (una barra por fila).
+
+    Args:
+        pesos (pd.DataFrame): Una fila por portafolio y una columna por activo
+            (por ejemplo, la salida de sensibilidad_pesos).
+        titulo (str, opcional): Título del gráfico.
+        ax (matplotlib.axes.Axes, opcional): Eje donde dibujar. Si es None se crea una figura nueva.
+
+    Returns:
+        tuple (matplotlib.figure.Figure, matplotlib.axes.Axes): Objetos Figure y Axes de Matplotlib.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+    else:
+        fig = ax.figure
+
+    etiquetas = [f"{v:.0%}" if isinstance(v, (int, float, np.floating)) else str(v) for v in pesos.index]
+    pesos.set_axis(etiquetas, axis=0).plot(kind="bar", stacked=True, ax=ax, width=0.7, alpha=0.85)
+
+    ax.set_title(titulo, fontsize=12, fontweight="bold")
+    ax.set_xlabel(pesos.index.name if pesos.index.name else "")
+    ax.set_ylabel("Peso")
+    ax.set_ylim(0, 1)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.tick_params(axis="x", rotation=45)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    return fig, ax
