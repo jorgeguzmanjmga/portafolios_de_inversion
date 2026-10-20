@@ -14,3 +14,4 @@ Este espacio centraliza las herramientas cuantitativas, modelos financieros y pr
 ├── lab_1.ipynb               # Lab 1: Medición de Riesgo y Rendimiento
 ├── lab_2.ipynb               # Lab 2: Estimadores no Gaussianos
 ├── lab_3.ipynb               # Lab 3: Frontera Eficiente
+├── lab_4.ipynb               # Lab 4: MSR, CML y GMV
