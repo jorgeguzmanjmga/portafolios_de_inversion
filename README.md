@@ -15,3 +15,4 @@ Este espacio centraliza las herramientas cuantitativas, modelos financieros y pr
 ├── lab_2.ipynb               # Lab 2: Estimadores no Gaussianos
 ├── lab_3.ipynb               # Lab 3: Frontera Eficiente
 ├── lab_4.ipynb               # Lab 4: MSR, CML y GMV
+├── lab_5.ipynb               # Lab 5: CPPI y Simulación

@@ -744,3 +744,263 @@ def plot_pesos_apilados(pesos, titulo="Pesos del portafolio", ax=None):
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     return fig, ax
+
+
+"""
+FUNCIONES LAB 5 (CPPI y simulación)
+
+"""
+
+def rendimientos_mensuales(rendimientos):
+    """Convierte rendimientos diarios en rendimientos mensuales componiendo los
+    rendimientos de cada mes: (1 + r_1)(1 + r_2)...(1 + r_n) - 1.
+
+    Args:
+        rendimientos (pd.Series | pd.DataFrame): Rendimientos diarios con índice de fechas.
+
+    Returns:
+        pd.Series | pd.DataFrame: Rendimientos mensuales (una fila por mes, fecha de fin de mes).
+    """
+    try:
+        agrupados = (1 + rendimientos).resample("ME")
+    except ValueError:  # versiones de pandas anteriores a 2.2
+        agrupados = (1 + rendimientos).resample("M")
+    return agrupados.prod() - 1
+
+
+def rendimiento_aritmetico_anualizado(rendimientos, p=252):
+    """Calcula el rendimiento aritmético anualizado (media por período x p).
+    Es el parámetro mu que usa el Movimiento Browniano Geométrico. No confundir con
+    rendimiento_anualizado (Lab 1), que es geométrico (CAGR) y es menor por
+    aproximadamente sigma^2 / 2.
+
+    Args:
+        rendimientos (pd.Series | pd.DataFrame): Rendimientos simples por período.
+        p (int, opcional): Número de períodos por año (252 diarios, 12 mensuales). Por defecto 252.
+
+    Returns:
+        float | pd.Series: Rendimiento aritmético anualizado en formato decimal.
+    """
+    return rendimientos.mean() * p
+
+
+def cppi(rend_riesgo, tasa_libre_de_riesgo=0.0, m=3, piso=0.8, valor_inicial=100000,
+         max_drawdown=None, p=12):
+    """Aplica la estrategia CPPI (Constant Proportion Portfolio Insurance) rebalanceando
+    en cada período. En cada período:
+        C = V - F,   E = min(M x C, V),   B = V - E
+    (E no puede ser negativo: si V < F todo se invierte en el activo libre de riesgo).
+
+    Args:
+        rend_riesgo (pd.Series | pd.DataFrame): Rendimientos por período del activo con riesgo.
+            Si es un DataFrame, cada columna es un escenario (por ejemplo, una simulación).
+        tasa_libre_de_riesgo (float, opcional): Tasa libre de riesgo anualizada. Por defecto 0.0.
+        m (float, opcional): Multiplicador M. Por defecto 3.
+        piso (float, opcional): Piso de protección F como proporción del valor inicial. Por defecto 0.8.
+        valor_inicial (float, opcional): Valor inicial del portafolio V. Por defecto 100,000.
+        max_drawdown (float, opcional): Máximo drawdown aceptable (1 - alfa), por ejemplo 0.1.
+            Si se indica, el piso se vuelve dinámico: F_t = alfa x P_t, con P_t el valor máximo
+            alcanzado por el portafolio; en ese caso se ignora 'piso'. Por defecto None.
+        p (int, opcional): Número de períodos por año, para convertir la tasa libre de riesgo
+            (12 si se rebalancea mensualmente). Por defecto 12.
+
+    Returns:
+        dict: Diccionario de DataFrames (una columna por escenario, una fila por período, valores
+            al final de cada período) con las llaves:
+            - 'Valor CPPI': valor del portafolio con la estrategia CPPI.
+            - 'Valor riesgo': valor si se invierte el 100% en el activo con riesgo.
+            - 'Piso': piso de protección vigente en cada período.
+            - 'Peso riesgo': proporción E / V invertida en el activo con riesgo durante el período.
+            - 'Rendimiento CPPI': rendimiento por período de la estrategia CPPI (para usar las
+              funciones de los Labs 1 y 2).
+    """
+    if isinstance(rend_riesgo, pd.Series):
+        rend_riesgo = rend_riesgo.to_frame(name=rend_riesgo.name if rend_riesgo.name is not None else "Riesgo")
+
+    rf_periodo = (1 + tasa_libre_de_riesgo) ** (1 / p) - 1
+    n_periodos, n_escenarios = rend_riesgo.shape
+
+    valor_cppi = pd.DataFrame(np.nan, index=rend_riesgo.index, columns=rend_riesgo.columns)
+    piso_hist = valor_cppi.copy()
+    peso_hist = valor_cppi.copy()
+
+    V = np.full(n_escenarios, float(valor_inicial))  # valor del portafolio
+    P = V.copy()  # valor máximo alcanzado (para el max drawdown)
+    F = np.full(n_escenarios, piso * valor_inicial)  # piso fijo
+
+    for t in range(n_periodos):
+        if max_drawdown is not None:
+            F = (1 - max_drawdown) * P  # piso dinámico
+        C = V - F  # colchón
+        peso_E = np.clip(m * C / V, 0, 1)  # E = min(M x C, V) y no negativo
+        E = peso_E * V
+        B = V - E
+
+        # el activo con riesgo y el libre de riesgo crecen durante el período
+        V = E * (1 + rend_riesgo.iloc[t].values) + B * (1 + rf_periodo)
+        P = np.maximum(P, V)
+
+        valor_cppi.iloc[t] = V
+        piso_hist.iloc[t] = F
+        peso_hist.iloc[t] = peso_E
+
+    valor_riesgo = valor_inicial * (1 + rend_riesgo).cumprod()
+    valor_anterior = valor_cppi.shift(1)
+    valor_anterior.iloc[0] = valor_inicial
+    rend_cppi = valor_cppi / valor_anterior - 1
+
+    return {
+        "Valor CPPI": valor_cppi,
+        "Valor riesgo": valor_riesgo,
+        "Piso": piso_hist,
+        "Peso riesgo": peso_hist,
+        "Rendimiento CPPI": rend_cppi,
+    }
+
+
+def resumen_cppi(resultado):
+    """Resume los valores finales de la estrategia CPPI contra invertir el 100% en el
+    activo con riesgo. Con varios escenarios (simulación) da la distribución del valor final.
+
+    Args:
+        resultado (dict): Salida de la función cppi.
+
+    Returns:
+        pd.DataFrame: Filas 'CPPI' y '100% riesgo'. Con un solo escenario: valor final, valor
+            mínimo y si el valor terminó algún período por debajo del piso (1 = sí, 0 = no).
+            Con varios escenarios: valor final promedio, mediana, percentil 5, peor caso y la
+            proporción de escenarios que terminaron algún período por debajo del piso (gap risk).
+    """
+    piso = resultado["Piso"]
+    un_escenario = piso.shape[1] == 1
+    filas = {}
+    for nombre, llave in [("CPPI", "Valor CPPI"), ("100% riesgo", "Valor riesgo")]:
+        valores = resultado[llave]
+        finales = valores.iloc[-1]
+        rompe_piso = (valores < piso).any()
+        if un_escenario:
+            filas[nombre] = {
+                "Valor final": finales.iloc[0],
+                "Valor mínimo": valores.min().iloc[0],
+                "Rompió el piso": float(rompe_piso.iloc[0]),
+            }
+        else:
+            filas[nombre] = {
+                "Valor final promedio": finales.mean(),
+                "Valor final mediana": finales.median(),
+                "Percentil 5": finales.quantile(0.05),
+                "Peor caso": finales.min(),
+                "Prob. romper el piso": rompe_piso.mean(),
+            }
+    return pd.DataFrame(filas).T
+
+
+def plot_cppi(resultado, escenario=None, titulo="Estrategia CPPI"):
+    """Grafica en dos paneles el valor del CPPI contra invertir el 100% en el activo con
+    riesgo junto con el piso de protección, y la proporción invertida en el activo con riesgo.
+
+    Args:
+        resultado (dict): Salida de la función cppi.
+        escenario (str | int, opcional): Columna (escenario) a graficar. Por defecto la primera.
+        titulo (str, opcional): Título principal del gráfico.
+
+    Returns:
+        tuple (matplotlib.figure.Figure, np.ndarray): Objetos Figure y Axes de Matplotlib.
+    """
+    if escenario is None:
+        escenario = resultado["Valor CPPI"].columns[0]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+
+    # Panel 1: valor del portafolio y piso
+    ax1.plot(resultado["Valor riesgo"][escenario], label="100% activo con riesgo", color="#1f77b4", lw=1.5)
+    ax1.plot(resultado["Valor CPPI"][escenario], label="CPPI", color="#ff7f0e", lw=1.8)
+    ax1.plot(resultado["Piso"][escenario], label="Piso (F)", color="#d62728", linestyle="--")
+    ax1.set_title(titulo, fontsize=12, fontweight="bold")
+    ax1.set_ylabel("Valor del portafolio")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left")
+
+    # Panel 2: peso en el activo con riesgo
+    ax2.plot(resultado["Peso riesgo"][escenario], color="#2ca02c", lw=1.5, drawstyle="steps-post")
+    ax2.set_ylabel("Peso en riesgo (E/V)")
+    ax2.set_ylim(0, 1.05)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig, (ax1, ax2)
+
+
+def simular_gbm(mu, sigma, n_escenarios=1000, anios=3, p=12, valor_inicial=100, semilla=None,
+                precios=False):
+    """Simula escenarios del Movimiento Browniano Geométrico con el esquema de Euler:
+        r_t = mu x dt + sigma x sqrt(dt) x Z,   Z ~ N(0, 1),   dt = 1 / p
+        S_(t+dt) = S_t x (1 + r_t)
+
+    Args:
+        mu (float): Rendimiento esperado anual (aritmético, ver rendimiento_aritmetico_anualizado).
+        sigma (float): Volatilidad anual.
+        n_escenarios (int, opcional): Número de escenarios a simular. Por defecto 1,000.
+        anios (float, opcional): Horizonte de la simulación en años. Por defecto 3.
+        p (int, opcional): Pasos por año (12 mensual, 52 semanal, 252 diario). Por defecto 12.
+        valor_inicial (float, opcional): Precio inicial S_0 (sólo si precios=True). Por defecto 100.
+        semilla (int, opcional): Semilla para que los resultados sean reproducibles. Por defecto None.
+        precios (bool, opcional): Si es True devuelve precios (con la fila 0 = S_0);
+            si es False devuelve rendimientos. Por defecto False.
+
+    Returns:
+        pd.DataFrame: Una fila por período y una columna por escenario.
+    """
+    dt = 1 / p
+    n_pasos = int(round(anios * p))
+    generador = np.random.default_rng(semilla)
+    Z = generador.standard_normal((n_pasos, n_escenarios))
+
+    rend = pd.DataFrame(mu * dt + sigma * np.sqrt(dt) * Z, index=range(1, n_pasos + 1))
+    rend.index.name = "Período"
+    if not precios:
+        return rend
+
+    trayectorias = valor_inicial * (1 + rend).cumprod()
+    fila_inicial = pd.DataFrame([[valor_inicial] * n_escenarios], index=[0], columns=rend.columns)
+    trayectorias = pd.concat([fila_inicial, trayectorias])
+    trayectorias.index.name = "Período"
+    return trayectorias
+
+
+def plot_simulacion(trayectorias, n_mostrar=50, titulo="Simulación de Monte Carlo"):
+    """Grafica algunas trayectorias simuladas y el histograma de los valores finales.
+
+    Args:
+        trayectorias (pd.DataFrame): Valores simulados, una columna por escenario
+            (por ejemplo, la salida de simular_gbm con precios=True).
+        n_mostrar (int, opcional): Número de trayectorias a dibujar. Por defecto 50.
+        titulo (str, opcional): Título principal del gráfico.
+
+    Returns:
+        tuple (matplotlib.figure.Figure, np.ndarray): Objetos Figure y Axes de Matplotlib.
+    """
+    finales = trayectorias.iloc[-1]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), sharey=True, gridspec_kw={'width_ratios': [3, 1]})
+
+    # Panel 1: trayectorias
+    ax1.plot(trayectorias.iloc[:, :n_mostrar], color="#1f77b4", alpha=0.3, lw=0.8)
+    ax1.axhline(trayectorias.iloc[0, 0], color="black", linestyle="--", lw=1, label="Valor inicial")
+    ax1.set_title(titulo, fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Período")
+    ax1.set_ylabel("Valor")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left")
+
+    # Panel 2: distribución de los valores finales
+    ax2.hist(finales, bins=50, orientation="horizontal", color="#1f77b4", alpha=0.6)
+    ax2.axhline(finales.mean(), color="#d62728", lw=1.5, label=f"Promedio: {finales.mean():,.2f}")
+    ax2.axhline(finales.median(), color="#2ca02c", lw=1.5, linestyle="--", label=f"Mediana: {finales.median():,.2f}")
+    ax2.set_title("Valores finales", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Frecuencia")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right")
+
+    plt.tight_layout()
+    return fig, (ax1, ax2)
